@@ -1,17 +1,16 @@
 mod pubsub;
 
-use tokio::io::Result;
-use pubsub::pubsub_handler::{PubsubHandler};
-use tokio::time::{sleep, Duration};
+use pubsub::pubsub_handler::PubsubHandler;
 use std::fs;
+use tokio::io::Result;
+use tokio::time::{sleep, Duration};
 
 ///main for test because i don't know how lib.rs and tests work
 
 #[tokio::main]
 pub async fn main() -> Result<()> {
-    
-    let oauth_key = fs::read_to_string("src/secret.txt")
-        .expect("Something went wrong reading the file");
+    let oauth_key =
+        fs::read_to_string("src/secret.txt").expect("Something went wrong reading the file");
 
     simple_logger::init_with_level(log::Level::Debug).unwrap();
 
@@ -25,9 +24,5 @@ pub async fn main() -> Result<()> {
     handler.read_thread_handler.unwrap().await?; //to keep the threads living
     handler.write_thread_handler.unwrap().await?;
 
-
     Ok(())
 }
-
-
-

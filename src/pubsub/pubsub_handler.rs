@@ -1,21 +1,18 @@
-
 use futures::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use log::{debug, error, info};
 use std::str;
+use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::{self, JoinHandle};
-use tokio::time::{sleep, Duration, Instant, timeout};
-use tokio::net::TcpStream;
+use tokio::time::{sleep, timeout, Duration, Instant};
 use tokio_tungstenite::{
-    connect_async,
-    tungstenite::protocol::Message,
-    MaybeTlsStream, WebSocketStream,
+    connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream,
 };
-use log::{info, debug, error};
 
 use super::pubsub_serializations::{Listen, MessageData, Request};
 
-/// DONE: implement internal Listen command function 
+/// DONE: implement internal Listen command function
 /// DONE: nonce check
 /// DONE: close message
 /// DONE: gracefull shutdown
@@ -25,7 +22,7 @@ use super::pubsub_serializations::{Listen, MessageData, Request};
 /// DONE: logging
 
 #[derive(Clone, Debug)]
-pub enum Shutdown{
+pub enum Shutdown {
     GRACEFULL, //Tracked in ping thread
     CLOSE,
     RECONNECT,
@@ -50,7 +47,7 @@ impl PubsubHandler {
             broadcaster_id: broadcaster_id.to_string(),
             oauth_token: oauth_token.to_string(),
             nonce: None,
-            message_export : None,
+            message_export: None,
             shutdown_broadcast_sender: None,
             write_thread_handler: None,
             read_thread_handler: None,
@@ -64,47 +61,63 @@ impl PubsubHandler {
     }
 
     pub async fn setup(&mut self) {
-
         self.set_nonce();
 
         let url = url::Url::parse(&self.url).unwrap();
         let connection = connect_async(url).await;
-        match connection{
-            Err(err)=> {
-                error!("Connection attempt failed. ERROR: {:?}",err);
-            },
+        match connection {
+            Err(err) => {
+                error!("Connection attempt failed. ERROR: {:?}", err);
+            }
             Ok((ws_stream, _response)) => {
-
                 info!("Connection successfull!");
                 let (writer, reader) = ws_stream.split();
 
-                let (reader_broadcast_sender, mut _reader_broadcast_receiver) = broadcast::channel::<Request>(16);
+                let (reader_broadcast_sender, mut _reader_broadcast_receiver) =
+                    broadcast::channel::<Request>(16);
                 let (writer_mpsc_sender, writer_mpsc_receiver) = mpsc::channel::<Request>(16);
-                let (shutdown_broadcast_sender, mut _shutdown_broadcast_receiver) = broadcast::channel::<Shutdown>(3);
-                let (message_export_broadcast_sender, _message_export_broadcast_receiver) = broadcast::channel(16);
+                let (shutdown_broadcast_sender, mut _shutdown_broadcast_receiver) =
+                    broadcast::channel::<Shutdown>(3);
+                let (message_export_broadcast_sender, _message_export_broadcast_receiver) =
+                    broadcast::channel(16);
                 self.shutdown_broadcast_sender = Some(shutdown_broadcast_sender.clone());
                 self.message_export = Some(message_export_broadcast_sender.clone());
 
-                self.send_listen(writer_mpsc_sender.clone(),
-                    reader_broadcast_sender.subscribe(), 
-                    shutdown_broadcast_sender.clone(), 
-                    shutdown_broadcast_sender.subscribe()).await;
-                
-                self.ping_thread_handler = Some(self.spawn_ping_thread(writer_mpsc_sender.clone(),
+                self.send_listen(
+                    writer_mpsc_sender.clone(),
                     reader_broadcast_sender.subscribe(),
                     shutdown_broadcast_sender.clone(),
                     shutdown_broadcast_sender.subscribe(),
-                ).await);
-                self.write_thread_handler = Some(self.spawn_write_thread(
-                    writer, writer_mpsc_receiver, shutdown_broadcast_sender.subscribe(),
-                ).await);
-                self.read_thread_handler = Some(self.spawn_read_thread(
-                    reader, 
-                    reader_broadcast_sender, shutdown_broadcast_sender.clone(),
-                    shutdown_broadcast_sender.subscribe(),
-                    message_export_broadcast_sender
-                ).await);
-                
+                )
+                .await;
+
+                self.ping_thread_handler = Some(
+                    self.spawn_ping_thread(
+                        writer_mpsc_sender.clone(),
+                        reader_broadcast_sender.subscribe(),
+                        shutdown_broadcast_sender.clone(),
+                        shutdown_broadcast_sender.subscribe(),
+                    )
+                    .await,
+                );
+                self.write_thread_handler = Some(
+                    self.spawn_write_thread(
+                        writer,
+                        writer_mpsc_receiver,
+                        shutdown_broadcast_sender.subscribe(),
+                    )
+                    .await,
+                );
+                self.read_thread_handler = Some(
+                    self.spawn_read_thread(
+                        reader,
+                        reader_broadcast_sender,
+                        shutdown_broadcast_sender.clone(),
+                        shutdown_broadcast_sender.subscribe(),
+                        message_export_broadcast_sender,
+                    )
+                    .await,
+                );
             }
         }
     }
@@ -119,7 +132,7 @@ impl PubsubHandler {
     ) -> JoinHandle<()> {
         task::spawn(async move {
             let mut keep_alive = true;
-            while keep_alive{
+            while keep_alive {
                 tokio::select! {
                     biased;
                     _ = async {
@@ -147,13 +160,13 @@ impl PubsubHandler {
                                                 debug!("MESSAGE Request sent to export broadcast channel in read thread. Sent data: {:?}",data);
                                             },
                                             _ => {}
-                                            
+
                                         }
                                     }
                                     Message::Close(_)=> {
                                         debug!("Raw close message from server!");
                                         shutdown_broadcast_sender.send(Shutdown::CLOSE).unwrap();
-                                        
+
                                     }
                                     _ => {}
                                 }
@@ -174,7 +187,7 @@ impl PubsubHandler {
     ) -> JoinHandle<()> {
         task::spawn(async move {
             let mut keep_alive = true;
-            while keep_alive{
+            while keep_alive {
                 tokio::select! {
                     biased;
                     _ = async {
@@ -215,10 +228,10 @@ impl PubsubHandler {
         message_broadcast_receiver: broadcast::Receiver<Request>,
         shutdown_broadcast_sender: broadcast::Sender<Shutdown>,
         mut shutdown_broadcast_receiver: broadcast::Receiver<Shutdown>,
-    )-> JoinHandle<()> {
+    ) -> JoinHandle<()> {
         task::spawn(async move {
             let mut keep_alive = true;
-            while keep_alive{
+            while keep_alive {
                 tokio::select! {
                     biased;
                     _ = async {
@@ -227,7 +240,7 @@ impl PubsubHandler {
                                 Shutdown::CLOSE | Shutdown::RECONNECT => {
                                     keep_alive = false;
                                     debug!("Shutdown message received in ping thread.");
-                                    
+
                                 },
                                 Shutdown::GRACEFULL => {
                                     message_mpsc_sender.send(Request::CLOSE).await.unwrap();
@@ -263,9 +276,7 @@ impl PubsubHandler {
             }
             debug!("Ping thread has ended.");
         })
-        
     }
-    
 
     async fn send_listen(
         &mut self,
@@ -273,13 +284,13 @@ impl PubsubHandler {
         message_broadcast_receiver: broadcast::Receiver<Request>,
         shutdown_broadcast_sender: broadcast::Sender<Shutdown>,
         mut shutdown_broadcast_receiver: broadcast::Receiver<Shutdown>,
-    ){
-        let request = Request::LISTEN { 
-            nonce: self.nonce.clone().unwrap(), 
-            data: Listen{
+    ) {
+        let request = Request::LISTEN {
+            nonce: self.nonce.clone().unwrap(),
+            data: Listen {
                 auth_token: self.oauth_token.clone(),
                 topics: vec!["channel-points-channel-v1.".to_string() + &self.broadcaster_id],
-            }
+            },
         };
         message_mpsc_sender.send(request.clone()).await.unwrap();
         debug!("LISTEN Request sent to message mpsc channel for to be send in write channel. Complete message: {:?}", request);
@@ -319,19 +330,14 @@ impl PubsubHandler {
                     }
                 } => {},
             }
-            
+
             debug!("Listen send thread has ended.");
         });
-
     }
 
-
-    pub async fn send_gracefull_shutdown_signal(&mut self){
-        if let Some(shutdown_broadcast_sender) = &self.shutdown_broadcast_sender{
+    pub async fn send_gracefull_shutdown_signal(&mut self) {
+        if let Some(shutdown_broadcast_sender) = &self.shutdown_broadcast_sender {
             shutdown_broadcast_sender.send(Shutdown::GRACEFULL).unwrap();
         }
     }
-
-
 }
-
