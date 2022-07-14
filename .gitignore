@@ -1,0 +1,4 @@
+/target
+/old
+/cargo.lock
+secret.txt
