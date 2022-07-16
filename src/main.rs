@@ -16,13 +16,14 @@ pub async fn main() -> Result<()> {
 
     let mut handler = PubsubHandler::new("32473614", &oauth_key);
 
-    handler.setup().await;
+    handler.setup(false).await;
+    handler.setup(true).await;
+    handler.setup(true).await;
 
-    sleep(Duration::from_secs(25)).await;
+    sleep(Duration::from_secs(5)).await;
     handler.send_gracefull_shutdown_signal().await;
 
-    handler.read_thread_handler.unwrap().await?; //to keep the threads living
-    handler.write_thread_handler.unwrap().await?;
+    handler.thread_handler.unwrap().await?; //to keep the threads living
 
     Ok(())
 }

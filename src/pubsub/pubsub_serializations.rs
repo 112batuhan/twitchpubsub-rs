@@ -25,6 +25,12 @@ impl Request {
             _ => None,
         }
     }
+    pub fn unwrap_listen(self) -> Option<(String, Listen)> {
+        match self {
+            Request::LISTEN { nonce, data } => Some((nonce, data)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
