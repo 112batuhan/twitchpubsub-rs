@@ -1,6 +1,7 @@
 use futures::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use log::{debug, error, info, warn};
+use std::fmt::Debug;
 use std::str;
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -93,9 +94,8 @@ impl PubsubHandler {
         )
         .await;
 
-        let counter = self.task_counter.clone();
         let thread_handler = spawn_setup_thread(
-            counter,
+            self.task_counter.clone(),
             request,
             connection_mpsc_receiver,
             shutdown_broadcast_sender,
@@ -112,18 +112,24 @@ impl PubsubHandler {
     }
 }
 
-///Periodically checks if there are multiple setup threads.
+/// Periodically checks if there are multiple setup threads.
+/// There should be 3 references:
+/// here, in setup thread, in base struct
+/// kill the thread if there are less than 3,
+/// kill other threads if there are more than 3.
 async fn spawn_counter_thread(
     counter: Arc<()>,
     shutdown_broadcast_sender: broadcast::Sender<Shutdown>,
 ) -> JoinHandle<()> {
     task::spawn(async move {
-        let counter = counter.clone();
         loop {
             sleep(Duration::from_secs(5)).await;
-            if Arc::strong_count(&counter) > 4 {
+            if Arc::strong_count(&counter) > 3 {
                 shutdown_broadcast_sender.send(Shutdown::RECONNECT).unwrap();
                 warn!("Multiple  threads are detected. Connection will be restarted.");
+            } else if Arc::strong_count(&counter) < 3 {
+                debug!("Closing counter thread.");
+                break;
             }
         }
     })
