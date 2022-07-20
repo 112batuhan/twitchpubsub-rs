@@ -1,8 +1,9 @@
 use futures::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use std::fmt::Debug;
 use std::str;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
@@ -14,11 +15,13 @@ use tokio_tungstenite::{
 
 use super::pubsub_serializations::{Listen, MessageData, Request};
 
+///BIG TODO: HANDLE ALL ERRORS!
+
 /// GRACEFULL is tracked in ping thread.
 /// GRACEFULL shutdown sends close message to the server first.
 /// CLOSE signals the threads to close
 /// RECONNECTS signals all threads to close except setup and
-/// TODO: implement gracefull reconnect ///!!!!!!!!!
+
 #[derive(Clone, Debug)]
 pub enum Shutdown {
     GRACEFULL,
@@ -32,7 +35,8 @@ pub struct PubsubHandler {
     broadcaster_id: String,
     oauth_token: String,
     nonce: String,
-    pub message_export: Option<broadcast::Sender<MessageData>>,
+    message_export_sender: Option<broadcast::Sender<MessageData>>,
+    pub active: Arc<AtomicBool>,
     pub shutdown_broadcast_sender: Option<broadcast::Sender<Shutdown>>,
     pub thread_handler: Option<JoinHandle<()>>,
 }
@@ -47,24 +51,29 @@ impl PubsubHandler {
             broadcaster_id: broadcaster_id.to_string(),
             oauth_token: oauth_token.to_string(),
             nonce: nonce,
+            active: Arc::new(AtomicBool::new(false)),
             ..Default::default()
         }
     }
 
-    pub async fn setup(&mut self, reconnect: bool) {
-        // This check does not work when multiple setups are called with short intervals.
-        // I need a way to eliminate/reset multiple threads when this happens.
-        if let Some(shutdown_broadcast_sender) = &self.shutdown_broadcast_sender {
+    pub async fn start(&mut self, reconnect: bool) {
+        if self.active.load(Ordering::SeqCst) == true {
             if reconnect {
                 debug!("Setup called when an active connection is present. Reconnecting.");
-                shutdown_broadcast_sender.send(Shutdown::RECONNECT).unwrap();
+                if let Some(shutdown_broadcast_sender) = &self.shutdown_broadcast_sender {
+                    //instead of this we could count the threads but this works too!
+                    if shutdown_broadcast_sender.receiver_count() < 6 {
+                        debug!("Still during the setup phase, Aborting reconnect.");
+                        return;
+                    }
+                    shutdown_broadcast_sender.send(Shutdown::RECONNECT).unwrap();
+                }
             } else {
-                debug!(
-                    "Setup called when an active connection is present. Opted out of reconnect."
-                );
+                debug!("Setup called when an active connection is present. Opted out of reconnect.");
             }
             return;
         }
+        self.active.store(true, Ordering::SeqCst);
 
         let request = Request::LISTEN {
             nonce: self.nonce.clone(),
@@ -77,11 +86,12 @@ impl PubsubHandler {
         let (shutdown_broadcast_sender, shutdown_broadcast_receiver) =
             broadcast::channel::<Shutdown>(3);
         let (message_export_broadcast_sender, _message_export_broadcast_receiver) =
-            broadcast::channel(16);
+            broadcast::channel::<MessageData>(16);
         self.shutdown_broadcast_sender = Some(shutdown_broadcast_sender.clone());
-        self.message_export = Some(message_export_broadcast_sender.clone());
+        self.message_export_sender = Some(message_export_broadcast_sender.clone());
 
         let thread_handler = spawn_setup_thread(
+            self.active.clone(),
             &self.url,
             request,
             shutdown_broadcast_sender,
@@ -92,15 +102,15 @@ impl PubsubHandler {
         self.thread_handler = Some(thread_handler);
     }
 
-    pub async fn send_gracefull_shutdown_signal(&mut self) {
+    pub async fn stop(&mut self) {
         if let Some(shutdown_broadcast_sender) = &self.shutdown_broadcast_sender {
             shutdown_broadcast_sender.send(Shutdown::GRACEFULL).unwrap();
         }
     }
 }
 
-
 async fn spawn_setup_thread(
+    active: Arc<AtomicBool>,
     url: &str,
     request: Request,
     shutdown_broadcast_sender: broadcast::Sender<Shutdown>,
@@ -109,84 +119,104 @@ async fn spawn_setup_thread(
 ) -> JoinHandle<()> {
     let url = url::Url::parse(&url).unwrap();
     task::spawn(async move {
+        let mut connect = true;
         'keep_alive: loop {
-            let retry_limit = 20;
-            let mut current_try = 0;
-            let mut retry_ms = 10;
+            if connect {
+                let retry_limit = 20;
+                let mut current_try = 0;
+                let mut retry_ms = 10;
 
-            let mut ws_stream: Option<WebSocketStream<MaybeTlsStream<TcpStream>>> = None;
+                let ws_stream: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
-            'keep_retry: loop {
-                let connection = connect_async(&url).await;
-                match connection {
-                    Err(err) => {
-                        error!("Connection attempt failed. ERROR: {:?}", err);
-                        sleep(Duration::from_millis(retry_ms)).await;
-                        retry_ms *= 2;
-                        current_try += 1;
+                'keep_retry: loop {
+                    let connection = connect_async(&url).await;
+                    match connection {
+                        Err(err) => {
+                            error!("Connection attempt failed. ERROR: {:?}", err);
+                            sleep(Duration::from_millis(retry_ms)).await;
+                            retry_ms *= 2;
+                            current_try += 1;
 
-                        if current_try >= retry_limit {
-                            error!("Failed to connect within retry limit. Cancelling the attemps.");
-                            break 'keep_alive;
+                            if current_try >= retry_limit {
+                                error!(
+                                    "Failed to connect within retry limit. Cancelling the attemps."
+                                );
+                                break 'keep_alive;
+                            }
+                        }
+                        Ok((local_ws_sream, _response)) => {
+                            ws_stream = Some(local_ws_sream);
+                            info!("Connection successful!");
+                            connect = false;
+                            break 'keep_retry;
                         }
                     }
-                    Ok((local_ws_sream, _response)) => {
-                        ws_stream = Some(local_ws_sream);
-                        info!("Connection successful!");
-                        break 'keep_retry;
-                    }
                 }
+
+                let (writer, reader) = ws_stream.unwrap().split();
+
+                let (reader_broadcast_sender, mut _reader_broadcast_receiver) =
+                    broadcast::channel::<Request>(16);
+                let (writer_mpsc_sender, writer_mpsc_receiver) = mpsc::channel::<Request>(16);
+
+                send_listen(
+                    request.clone(),
+                    writer_mpsc_sender.clone(),
+                    reader_broadcast_sender.subscribe(),
+                    shutdown_broadcast_sender.clone(),
+                    shutdown_broadcast_sender.subscribe(),
+                )
+                .await;
+
+                spawn_ping_thread(
+                    writer_mpsc_sender.clone(),
+                    reader_broadcast_sender.subscribe(),
+                    shutdown_broadcast_sender.clone(),
+                    shutdown_broadcast_sender.subscribe(),
+                )
+                .await;
+
+                spawn_write_thread(
+                    writer,
+                    writer_mpsc_receiver,
+                    shutdown_broadcast_sender.subscribe(),
+                )
+                .await;
+
+                spawn_read_thread(
+                    reader,
+                    reader_broadcast_sender,
+                    shutdown_broadcast_sender.clone(),
+                    shutdown_broadcast_sender.subscribe(),
+                    message_export_broadcast_sender.clone(),
+                )
+                .await;
+
+                spawn_shutdown_thread(
+                    writer_mpsc_sender.clone(),
+                    shutdown_broadcast_sender.clone(),
+                    shutdown_broadcast_sender.subscribe(),
+                )
+                .await;
             }
 
-            let (writer, reader) = ws_stream.unwrap().split();
-
-            let (reader_broadcast_sender, mut _reader_broadcast_receiver) =
-                broadcast::channel::<Request>(16);
-            let (writer_mpsc_sender, writer_mpsc_receiver) = mpsc::channel::<Request>(16);
-
-            send_listen(
-                request.clone(),
-                writer_mpsc_sender.clone(),
-                reader_broadcast_sender.subscribe(),
-                shutdown_broadcast_sender.clone(),
-                shutdown_broadcast_sender.subscribe(),
-            )
-            .await;
-
-            spawn_ping_thread(
-                writer_mpsc_sender.clone(),
-                reader_broadcast_sender.subscribe(),
-                shutdown_broadcast_sender.clone(),
-                shutdown_broadcast_sender.subscribe(),
-            )
-            .await;
-
-            spawn_write_thread(
-                writer,
-                writer_mpsc_receiver,
-                shutdown_broadcast_sender.subscribe(),
-            )
-            .await;
-
-            spawn_read_thread(
-                reader,
-                reader_broadcast_sender,
-                shutdown_broadcast_sender.clone(),
-                shutdown_broadcast_sender.subscribe(),
-                message_export_broadcast_sender.clone(),
-            )
-            .await;
-
-            if let Ok(shutdown_message) = shutdown_broadcast_receiver.recv().await{
+            if let Ok(shutdown_message) = shutdown_broadcast_receiver.recv().await {
                 match shutdown_message {
                     Shutdown::CLOSE => {
+                        debug!(
+                            "Close message received in setup thread. The thread won't continue."
+                        );
                         break 'keep_alive;
-                    },
-                    _ => {},
+                    }
+                    Shutdown::RECONNECT => {
+                        debug!("Reconnect message received in setup thread. The connection will be restarted.");
+                        connect = true;
+                    }
+                    _ => {}
                 }
             }
-
         }
+        active.store(false, Ordering::SeqCst);
         debug!("Setup thread has ended.");
     })
 }
@@ -224,8 +254,13 @@ async fn spawn_read_thread(
                                     debug!("Request send to message broadcast channel in read thread. Sent data: {:?}",serialized_message.clone());
                                     match serialized_message {
                                         Request::MESSAGE {data} => {
-                                            message_export_broadcast_sender.send(data.clone()).unwrap();
-                                            debug!("MESSAGE Request sent to export broadcast channel in read thread. Sent data: {:?}",data);
+                                            if let Ok(_) = message_export_broadcast_sender.send(data.clone()){
+                                                debug!("MESSAGE Request sent to export broadcast channel in read thread. Sent data: {:?}",data);
+                                            }
+                                            else{
+                                                debug!("MESSAGE could not be exported. No active receivers.");
+                                            }
+
                                         },
                                         _ => {}
 
@@ -307,10 +342,7 @@ async fn spawn_ping_thread(
                                 debug!("Shutdown message received in ping thread.");
 
                             },
-                            Shutdown::GRACEFULL => {
-                                message_mpsc_sender.send(Request::CLOSE).await.unwrap();
-                                debug!("Gracefull shutdown message received in ping thread.");
-                            }
+                            _ => {},
                         }
                     }
                 } => {},
@@ -391,5 +423,53 @@ async fn send_listen(
         }
 
         debug!("Listen send thread has ended.");
+    })
+}
+
+/// Second future sends close message to write thread to send close message to server.
+/// If the server responds with close message, The read thread sends the close message
+/// to other threads and closes them.
+/// If not, then the second future waits for 10 seconds, then sends the close message itself.
+async fn spawn_shutdown_thread(
+    message_mpsc_sender: mpsc::Sender<Request>,
+    shutdown_broadcast_sender: broadcast::Sender<Shutdown>,
+    mut shutdown_broadcast_receiver: broadcast::Receiver<Shutdown>,
+) -> JoinHandle<()> {
+    let mut gracefull_shutdown_broadcast_receiver = shutdown_broadcast_sender.subscribe();
+    task::spawn(async move {
+        let mut keep_alive = true;
+        while keep_alive {
+            tokio::select! {
+                biased;
+                _ = async {
+                    if let Ok(shutdown_message) = shutdown_broadcast_receiver.recv().await{
+                        match shutdown_message {
+                            Shutdown::CLOSE | Shutdown::RECONNECT => {
+                                keep_alive = false;
+                                debug!("Shutdown message received in shutdown thread.");
+
+                            },
+                            _ => {},
+                        }
+                    }
+                } => {},
+                _ = async {
+                    if let Ok(shutdown_message) = gracefull_shutdown_broadcast_receiver.recv().await{
+                        match shutdown_message {
+                            Shutdown::GRACEFULL => {
+                                debug!("Gracefull shutdown message received in shutdown thread.");
+                                message_mpsc_sender.send(Request::CLOSE).await.unwrap();
+                                sleep(Duration::from_secs(5)).await;
+                                debug!("No close message received in time. Forcing the shutdown.");
+                                shutdown_broadcast_sender.send(Shutdown::CLOSE).unwrap();
+                            }
+                            _ => {},
+                        }
+                    }
+                } => {},
+
+            }
+        }
+        debug!("Shutdown thread has ended.");
     })
 }
