@@ -32,7 +32,6 @@ pub struct PubsubHandler {
     broadcaster_id: String,
     oauth_token: String,
     nonce: String,
-    task_counter: Arc<()>,
     pub message_export: Option<broadcast::Sender<MessageData>>,
     pub shutdown_broadcast_sender: Option<broadcast::Sender<Shutdown>>,
     pub thread_handler: Option<JoinHandle<()>>,
@@ -48,7 +47,6 @@ impl PubsubHandler {
             broadcaster_id: broadcaster_id.to_string(),
             oauth_token: oauth_token.to_string(),
             nonce: nonce,
-            task_counter: Arc::new(()),
             ..Default::default()
         }
     }
@@ -76,29 +74,18 @@ impl PubsubHandler {
             },
         };
 
-        let (shutdown_broadcast_sender, _shutdown_broadcast_receiver) =
+        let (shutdown_broadcast_sender, shutdown_broadcast_receiver) =
             broadcast::channel::<Shutdown>(3);
         let (message_export_broadcast_sender, _message_export_broadcast_receiver) =
             broadcast::channel(16);
         self.shutdown_broadcast_sender = Some(shutdown_broadcast_sender.clone());
         self.message_export = Some(message_export_broadcast_sender.clone());
 
-        let (connection_mpsc_sender, connection_mpsc_receiver) =
-            mpsc::channel::<WebSocketStream<MaybeTlsStream<TcpStream>>>(3);
-
-        spawn_counter_thread(self.task_counter.clone(), shutdown_broadcast_sender.clone()).await;
-        spawn_connect_thread(
-            &self.url,
-            shutdown_broadcast_sender.subscribe(),
-            connection_mpsc_sender,
-        )
-        .await;
-
         let thread_handler = spawn_setup_thread(
-            self.task_counter.clone(),
+            &self.url,
             request,
-            connection_mpsc_receiver,
             shutdown_broadcast_sender,
+            shutdown_broadcast_receiver,
             message_export_broadcast_sender,
         )
         .await;
@@ -123,11 +110,12 @@ async fn spawn_counter_thread(
 ) -> JoinHandle<()> {
     task::spawn(async move {
         loop {
-            sleep(Duration::from_secs(5)).await;
-            if Arc::strong_count(&counter) > 3 {
-                shutdown_broadcast_sender.send(Shutdown::RECONNECT).unwrap();
+            sleep(Duration::from_millis(200)).await;
+            if Arc::strong_count(&counter) > 2 {
+                //shutdown_broadcast_sender.send(Shutdown::RECONNECT).unwrap();
                 warn!("Multiple  threads are detected. Connection will be restarted.");
-            } else if Arc::strong_count(&counter) < 3 {
+                println!("{}",Arc::strong_count(&counter));
+            } else if Arc::strong_count(&counter) < 2 {
                 debug!("Closing counter thread.");
                 break;
             }
@@ -135,10 +123,12 @@ async fn spawn_counter_thread(
     })
 }
 
-async fn spawn_connect_thread(
+async fn spawn_setup_thread(
     url: &str,
+    request: Request,
+    shutdown_broadcast_sender: broadcast::Sender<Shutdown>,
     mut shutdown_broadcast_receiver: broadcast::Receiver<Shutdown>,
-    connection_broadcast_sender: mpsc::Sender<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+    message_export_broadcast_sender: broadcast::Sender<MessageData>,
 ) -> JoinHandle<()> {
     let url = url::Url::parse(&url).unwrap();
     task::spawn(async move {
@@ -146,6 +136,8 @@ async fn spawn_connect_thread(
             let retry_limit = 20;
             let mut current_try = 0;
             let mut retry_ms = 10;
+
+            let mut ws_stream: Option<WebSocketStream<MaybeTlsStream<TcpStream>>> = None;
 
             'keep_retry: loop {
                 let connection = connect_async(&url).await;
@@ -161,88 +153,62 @@ async fn spawn_connect_thread(
                             break 'keep_alive;
                         }
                     }
-                    Ok((ws_stream, _response)) => {
-                        connection_broadcast_sender.send(ws_stream).await.unwrap();
+                    Ok((local_ws_sream, _response)) => {
+                        ws_stream = Some(local_ws_sream);
                         info!("Connection successful!");
-                        debug!("Sending connection to setup thread");
                         break 'keep_retry;
                     }
                 }
             }
-            if let Ok(shutdown_message) = shutdown_broadcast_receiver.recv().await {
+            
+            let (writer, reader) = ws_stream.unwrap().split();
+
+            let (reader_broadcast_sender, mut _reader_broadcast_receiver) =
+                broadcast::channel::<Request>(16);
+            let (writer_mpsc_sender, writer_mpsc_receiver) = mpsc::channel::<Request>(16);
+
+            send_listen(
+                request.clone(),
+                writer_mpsc_sender.clone(),
+                reader_broadcast_sender.subscribe(),
+                shutdown_broadcast_sender.clone(),
+                shutdown_broadcast_sender.subscribe(),
+            )
+            .await;
+
+            spawn_ping_thread(
+                writer_mpsc_sender.clone(),
+                reader_broadcast_sender.subscribe(),
+                shutdown_broadcast_sender.clone(),
+                shutdown_broadcast_sender.subscribe(),
+            )
+            .await;
+
+            spawn_write_thread(
+                writer,
+                writer_mpsc_receiver,
+                shutdown_broadcast_sender.subscribe(),
+            )
+            .await;
+
+            spawn_read_thread(
+                reader,
+                reader_broadcast_sender,
+                shutdown_broadcast_sender.clone(),
+                shutdown_broadcast_sender.subscribe(),
+                message_export_broadcast_sender.clone(),
+            )
+            .await;
+
+            if let Ok(shutdown_message) = shutdown_broadcast_receiver.recv().await{
                 match shutdown_message {
                     Shutdown::CLOSE => {
-                        debug!("Shutdown close message received in connect thread.");
                         break 'keep_alive;
-                    }
-                    Shutdown::RECONNECT => {
-                        debug!("Shutdown reconnect message received in connect thread.");
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
             }
-        }
-        debug!("Connect thread has ended!");
-    })
-}
 
-/// This thread closes when the connection thread is closed and
-/// connection mpsc sender is dropped.
-async fn spawn_setup_thread(
-    counter: Arc<()>,
-    request: Request,
-    mut connection_mpsc_receiver: mpsc::Receiver<WebSocketStream<MaybeTlsStream<TcpStream>>>,
-    shutdown_broadcast_sender: broadcast::Sender<Shutdown>,
-    message_export_broadcast_sender: broadcast::Sender<MessageData>,
-) -> JoinHandle<()> {
-    task::spawn(async move {
-        'keep_alive: loop {
-            if let Some(ws_stream) = connection_mpsc_receiver.recv().await {
-                debug!("Connection received in setup thread. Setup has been started.");
-                let _counter = counter.clone();
-
-                let (writer, reader) = ws_stream.split();
-
-                let (reader_broadcast_sender, mut _reader_broadcast_receiver) =
-                    broadcast::channel::<Request>(16);
-                let (writer_mpsc_sender, writer_mpsc_receiver) = mpsc::channel::<Request>(16);
-
-                send_listen(
-                    request.clone(),
-                    writer_mpsc_sender.clone(),
-                    reader_broadcast_sender.subscribe(),
-                    shutdown_broadcast_sender.clone(),
-                    shutdown_broadcast_sender.subscribe(),
-                )
-                .await;
-
-                spawn_ping_thread(
-                    writer_mpsc_sender.clone(),
-                    reader_broadcast_sender.subscribe(),
-                    shutdown_broadcast_sender.clone(),
-                    shutdown_broadcast_sender.subscribe(),
-                )
-                .await;
-
-                spawn_write_thread(
-                    writer,
-                    writer_mpsc_receiver,
-                    shutdown_broadcast_sender.subscribe(),
-                )
-                .await;
-
-                spawn_read_thread(
-                    reader,
-                    reader_broadcast_sender,
-                    shutdown_broadcast_sender.clone(),
-                    shutdown_broadcast_sender.subscribe(),
-                    message_export_broadcast_sender.clone(),
-                )
-                .await;
-            } else {
-                debug!("Connection sender has been dropped.");
-                break 'keep_alive;
-            }
         }
         debug!("Setup thread has ended.");
     })
