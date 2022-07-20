@@ -99,29 +99,6 @@ impl PubsubHandler {
     }
 }
 
-/// Periodically checks if there are multiple setup threads.
-/// There should be 3 references:
-/// here, in setup thread, in base struct
-/// kill the thread if there are less than 3,
-/// kill other threads if there are more than 3.
-async fn spawn_counter_thread(
-    counter: Arc<()>,
-    shutdown_broadcast_sender: broadcast::Sender<Shutdown>,
-) -> JoinHandle<()> {
-    task::spawn(async move {
-        loop {
-            sleep(Duration::from_millis(200)).await;
-            if Arc::strong_count(&counter) > 2 {
-                //shutdown_broadcast_sender.send(Shutdown::RECONNECT).unwrap();
-                warn!("Multiple  threads are detected. Connection will be restarted.");
-                println!("{}",Arc::strong_count(&counter));
-            } else if Arc::strong_count(&counter) < 2 {
-                debug!("Closing counter thread.");
-                break;
-            }
-        }
-    })
-}
 
 async fn spawn_setup_thread(
     url: &str,
@@ -160,7 +137,7 @@ async fn spawn_setup_thread(
                     }
                 }
             }
-            
+
             let (writer, reader) = ws_stream.unwrap().split();
 
             let (reader_broadcast_sender, mut _reader_broadcast_receiver) =
