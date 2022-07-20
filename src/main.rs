@@ -22,8 +22,10 @@ pub async fn main() -> Result<()> {
     //sleep(Duration::from_secs(10)).await;
     handler.start(true).await;
 
-    sleep(Duration::from_secs(250)).await;
+    sleep(Duration::from_secs(10)).await;
     handler.stop().await;
+
+    handler.get_message_receiver();
 
     sleep(Duration::from_secs(10)).await;
     handler.start(true).await;

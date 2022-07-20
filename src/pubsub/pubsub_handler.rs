@@ -15,9 +15,9 @@ use tokio_tungstenite::{
 
 use super::pubsub_serializations::{Listen, MessageData, Request};
 
-///BIG TODO: HANDLE ALL ERRORS!
+/// BIG TODO: HANDLE ALL ERRORS!
+/// TODO: implement drop
 
-/// GRACEFULL is tracked in ping thread.
 /// GRACEFULL shutdown sends close message to the server first.
 /// CLOSE signals the threads to close
 /// RECONNECTS signals all threads to close except setup and
@@ -69,7 +69,9 @@ impl PubsubHandler {
                     shutdown_broadcast_sender.send(Shutdown::RECONNECT).unwrap();
                 }
             } else {
-                debug!("Setup called when an active connection is present. Opted out of reconnect.");
+                debug!(
+                    "Setup called when an active connection is present. Opted out of reconnect."
+                );
             }
             return;
         }
@@ -107,6 +109,15 @@ impl PubsubHandler {
             shutdown_broadcast_sender.send(Shutdown::GRACEFULL).unwrap();
         }
     }
+
+    pub fn get_message_receiver(&mut self) -> Option<broadcast::Receiver<MessageData>>{
+        if let Some(message_export_sender) = &self.message_export_sender {
+            Some(message_export_sender.subscribe())
+        }else{
+            None
+        }
+    }
+
 }
 
 async fn spawn_setup_thread(
