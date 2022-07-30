@@ -1,6 +1,5 @@
 use futures::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use tracing::{debug, error, info};
 use std::fmt::Debug;
 use std::str;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +11,7 @@ use tokio::time::{sleep, timeout, Duration, Instant};
 use tokio_tungstenite::{
     connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream,
 };
+use tracing::{debug, error, info};
 
 use super::pubsub_serializations::{Listen, MessageData, Request};
 
@@ -66,6 +66,7 @@ impl PubsubHandler {
                         debug!("Still during the setup phase, Aborting reconnect.");
                         return;
                     }
+                    //this unwrap is protected by the if statement so i'm keeping it.
                     shutdown_broadcast_sender.send(Shutdown::RECONNECT).unwrap();
                 }
             } else {
@@ -106,18 +107,22 @@ impl PubsubHandler {
 
     pub async fn stop(&mut self) {
         if let Some(shutdown_broadcast_sender) = &self.shutdown_broadcast_sender {
-            shutdown_broadcast_sender.send(Shutdown::GRACEFULL).unwrap();
+            if let Err(err) = shutdown_broadcast_sender.send(Shutdown::GRACEFULL) {
+                error!(
+                    "An error occured: {}\n It's probably because there is no active connection.",
+                    err
+                )
+            }
         }
     }
 
-    pub fn get_message_receiver(&mut self) -> Option<broadcast::Receiver<MessageData>>{
+    pub fn get_message_receiver(&mut self) -> Option<broadcast::Receiver<MessageData>> {
         if let Some(message_export_sender) = &self.message_export_sender {
             Some(message_export_sender.subscribe())
-        }else{
+        } else {
             None
         }
     }
-
 }
 
 async fn spawn_setup_thread(
@@ -128,6 +133,8 @@ async fn spawn_setup_thread(
     mut shutdown_broadcast_receiver: broadcast::Receiver<Shutdown>,
     message_export_broadcast_sender: broadcast::Sender<MessageData>,
 ) -> JoinHandle<()> {
+
+    //TODO: Put this url in new()
     let url = url::Url::parse(&url).unwrap();
     task::spawn(async move {
         let mut connect = true;
@@ -260,26 +267,37 @@ async fn spawn_read_thread(
                         if let Ok(message) = message_result{
                             match message {
                                 Message::Text(text) => {
-                                    let serialized_message: Request = serde_json::from_str(&text).unwrap();
-                                    message_broadcast_sender.send(serialized_message.clone()).unwrap();
-                                    debug!("Request send to message broadcast channel in read thread. Sent data: {:?}",serialized_message.clone());
-                                    match serialized_message {
-                                        Request::MESSAGE {data} => {
-                                            if let Ok(_) = message_export_broadcast_sender.send(data.clone()){
-                                                debug!("MESSAGE Request sent to export broadcast channel in read thread. Sent data: {:?}",data);
-                                            }
-                                            else{
-                                                debug!("MESSAGE could not be exported. No active receivers.");
-                                            }
+                                    let serialized_message_response:Result<Request, serde_json::Error> = serde_json::from_str(&text);
+                                    match serialized_message_response {
+                                        Err(err) => error!("Unexpected message format from server. {:?}", err),
+                                        Ok(serialized_message) => {
+                                            if let Err(_) = message_broadcast_sender.send(serialized_message.clone()){
+                                                error!("Error while sending messages to other threads from read thread. No active receivers.");
+                                            }else{
+                                                debug!("Request send to message broadcast channel in read thread. Sent data: {:?}",serialized_message.clone());
+                                                match serialized_message {
+                                                    Request::MESSAGE {data} => {
+                                                        if let Ok(_) = message_export_broadcast_sender.send(data.clone()){
+                                                            debug!("MESSAGE Request sent to export broadcast channel in read thread. Sent data: {:?}",data);
+                                                        }
+                                                        else{
+                                                            debug!("MESSAGE could not be exported. No active receivers.");
+                                                        }
 
-                                        },
-                                        _ => {}
+                                                    },
+                                                    _ => {}
 
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 Message::Close(_)=> {
                                     debug!("Raw close message from server!");
-                                    shutdown_broadcast_sender.send(Shutdown::CLOSE).unwrap();
+                                    if let Err(_) = shutdown_broadcast_sender.send(Shutdown::CLOSE){
+                                        error!("An error occured while trying to send shutdown message from read thread to other threads.
+                                                No active shutdown broadcast receivers.");
+                                    }
                                 }
                                 _ => {}
                             }
@@ -317,13 +335,25 @@ async fn spawn_write_thread(
                     if let Some(request) = message_mpsc_receiver.recv().await{
                         match request {
                             Request::CLOSE => {
-                                writer.send(Message::Close(None)).await.unwrap();
-                                debug!("Close message sent to server in write thread.")
+                                if let Err(err) = writer.send(Message::Close(None)).await{
+                                    error!("An error occured while trying to send close message to server in read thread. Error: {}", err);
+                                }else{
+                                    debug!("Close message sent to server in write thread.");
+                                }
                             },
                             _ => {
-                                let request_str = serde_json::to_string(&request).unwrap();
-                                debug!("Request message sent to server in write thread. Raw JSON: {:?}",request_str);
-                                writer.send(Message::text(request_str)).await.unwrap();
+                                let request_str_result = serde_json::to_string(&request);
+                                match request_str_result {
+                                    Err(err) => error!("An error occured when trying to deserialize. Check serializations. Error: {}", err),
+                                    Ok(request_str) => {
+                                        debug!("Request message sent to server in write thread. Raw JSON: {:?}",request_str);
+                                        if let Err(err) = writer.send(Message::text(request_str.clone())).await{
+                                            error!("An error occured while trying to send message to server in read thread. Error: {}", err);
+                                        }else{
+                                            debug!("Request message sent to server in write thread. Raw JSON: {:?}", request_str);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

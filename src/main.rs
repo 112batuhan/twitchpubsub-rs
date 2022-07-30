@@ -14,14 +14,14 @@ pub async fn main() -> Result<()> {
     let oauth_key =
         fs::read_to_string("src/secret.txt").expect("Something went wrong reading the file");
 
-        
     let subscriber = FmtSubscriber::builder()
-    .with_max_level(Level::TRACE)
-    .finish();
+        .with_max_level(Level::TRACE)
+        .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let mut handler = PubsubHandler::new("32473614", &oauth_key);
-
+    
+    sleep(Duration::from_secs(10)).await;
     handler.start(false).await;
     //sleep(Duration::from_secs(10)).await;
     handler.start(true).await;
