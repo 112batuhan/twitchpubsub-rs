@@ -1,6 +1,6 @@
 use futures::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use log::{debug, error, info};
+use tracing::{debug, error, info};
 use std::fmt::Debug;
 use std::str;
 use std::sync::atomic::{AtomicBool, Ordering};
