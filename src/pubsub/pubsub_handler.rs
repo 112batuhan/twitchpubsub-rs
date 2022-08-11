@@ -16,7 +16,7 @@ use tracing::{debug, error, info};
 use super::pubsub_serializations::{Listen, MessageData, Request};
 
 /// BIG TODO: HANDLE ALL ERRORS!
-/// TODO: implement drop
+/// TODO: implement drop ??
 
 /// GRACEFULL shutdown sends close message to the server first.
 /// CLOSE signals the threads to close
@@ -109,7 +109,7 @@ impl PubsubHandler {
         if let Some(shutdown_broadcast_sender) = &self.shutdown_broadcast_sender {
             if let Err(err) = shutdown_broadcast_sender.send(Shutdown::GRACEFULL) {
                 error!(
-                    "An error occured: {}\n It's probably because there is no active connection.",
+                    "An error occured: {} It's probably because there is no active connection.",
                     err
                 )
             }
@@ -133,7 +133,6 @@ async fn spawn_setup_thread(
     mut shutdown_broadcast_receiver: broadcast::Receiver<Shutdown>,
     message_export_broadcast_sender: broadcast::Sender<MessageData>,
 ) -> JoinHandle<()> {
-
     //TODO: Put this url in new()
     let url = url::Url::parse(&url).unwrap();
     task::spawn(async move {
@@ -285,8 +284,15 @@ async fn spawn_read_thread(
                                                         }
 
                                                     },
-                                                    _ => {}
+                                                    Request::RECONNECT => {
+                                                        debug!("RECONNECT message from server.");
+                                                        if let Err(_) = shutdown_broadcast_sender.send(Shutdown::RECONNECT){
+                                                            error!("An error occured while trying to send shutdown message from read thread to other threads.
+                                                                    No active shutdown broadcast receivers.");
+                                                        }
 
+                                                    },
+                                                    _ => {}
                                                 }
                                             }
                                         }
@@ -446,11 +452,13 @@ async fn send_listen(
                                 error!("Nonce check failed! Trying reconnection.");
                                 shutdown_broadcast_sender.send(Shutdown::RECONNECT).unwrap();
                             }
-                            if error != "".to_string(){
-                                error!("Server sent an error: {}", error);
-                                shutdown_broadcast_sender.send(Shutdown::RECONNECT).unwrap();
+                            else if error != "".to_string(){
+                                error!("Server sent an error in response to LISTEN request: {}", error);
+                                shutdown_broadcast_sender.send(Shutdown::CLOSE).unwrap();
                             }
-                            info!("Response received without errors.");
+                            else{
+                                info!("Response received without errors.");
+                            }
                         }else if elapsed_time > Duration::from_secs(10){
                             error!("No response has been received in 10 seconds after sending LISTEN request! Trying reconnection.");
                             shutdown_broadcast_sender.send(Shutdown::RECONNECT).unwrap();

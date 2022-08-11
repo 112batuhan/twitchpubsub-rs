@@ -20,7 +20,7 @@ pub async fn main() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let mut handler = PubsubHandler::new("32473614", &oauth_key);
-    
+
     sleep(Duration::from_secs(10)).await;
     handler.start(false).await;
     //sleep(Duration::from_secs(10)).await;
