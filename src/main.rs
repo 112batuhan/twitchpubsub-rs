@@ -1,7 +1,7 @@
-mod threads;
 mod pubsub_handler;
 mod pubsub_serializations;
 mod shutdown_enum;
+mod threads;
 
 use pubsub_handler::PubsubHandler;
 use std::fs;
