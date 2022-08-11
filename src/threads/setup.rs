@@ -15,8 +15,8 @@ use super::read::spawn_read_thread;
 use super::shutdown::spawn_shutdown_thread;
 use super::write::spawn_write_thread;
 
-use crate::pubsub::pubsub_serializations::{MessageData, Request};
-use crate::pubsub::shutdown_enum::Shutdown;
+use crate::pubsub_serializations::{MessageData, Request};
+use crate::shutdown_enum::Shutdown;
 
 pub async fn spawn_setup_thread(
     active: Arc<AtomicBool>,

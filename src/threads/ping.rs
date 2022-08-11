@@ -3,8 +3,8 @@ use tokio::task::{self, JoinHandle};
 use tokio::time::{sleep, timeout, Duration, Instant};
 use tracing::{debug, error};
 
-use crate::pubsub::pubsub_serializations::Request;
-use crate::pubsub::shutdown_enum::Shutdown;
+use crate::pubsub_serializations::Request;
+use crate::shutdown_enum::Shutdown;
 
 pub async fn spawn_ping_thread(
     message_mpsc_sender: mpsc::Sender<Request>,

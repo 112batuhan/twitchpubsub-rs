@@ -6,8 +6,8 @@ use tokio::task::{self, JoinHandle};
 use tokio_tungstenite::{tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, error};
 
-use crate::pubsub::pubsub_serializations::Request;
-use crate::pubsub::shutdown_enum::Shutdown;
+use crate::pubsub_serializations::Request;
+use crate::shutdown_enum::Shutdown;
 
 pub async fn spawn_write_thread(
     mut writer: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,

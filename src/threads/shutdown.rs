@@ -4,8 +4,8 @@ use tokio::time::{sleep, Duration};
 
 use tracing::debug;
 
-use crate::pubsub::pubsub_serializations::Request;
-use crate::pubsub::shutdown_enum::Shutdown;
+use crate::pubsub_serializations::Request;
+use crate::shutdown_enum::Shutdown;
 
 /// Second future sends close message to write thread to send close message to server.
 /// If the server responds with close message, The read thread sends the close message

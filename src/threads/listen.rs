@@ -3,8 +3,8 @@ use tokio::task::{self, JoinHandle};
 use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, error, info};
 
-use crate::pubsub::pubsub_serializations::Request;
-use crate::pubsub::shutdown_enum::Shutdown;
+use crate::pubsub_serializations::Request;
+use crate::shutdown_enum::Shutdown;
 
 pub async fn spawn_listen_thread(
     request: Request,
