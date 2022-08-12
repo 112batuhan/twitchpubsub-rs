@@ -33,8 +33,6 @@ use tokio::time::{sleep, Duration};
 use tracing::{self, Level};
 use tracing_subscriber::FmtSubscriber;
 
-///main for test because i don't know how lib.rs and tests work
-
 #[tokio::main]
 pub async fn main() -> Result<()> {
     
