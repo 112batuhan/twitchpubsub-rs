@@ -30,28 +30,43 @@ pub async fn spawn_ping_thread(
                     }
                 } => {},
                 _ = async {sleep(Duration::from_secs(5*60)).await;
-                    message_mpsc_sender.send(Request::PING).await.unwrap();
-                    let mut message_broadcast_receiver = message_broadcast_receiver.resubscribe();
-                    let start_of_pong_wait = Instant::now();
-                    loop{
-                        if let Ok(request_result) = timeout(Duration::from_secs(10), message_broadcast_receiver.recv()).await{
-                            if let Ok(request) = request_result{
-                                let elapsed_time = Instant::now().duration_since(start_of_pong_wait);
-                                if matches!(request, Request::PONG) && elapsed_time < Duration::from_secs(10){
-                                    debug!("Received PONG in time!");
-                                    break;
-                                }else if elapsed_time > Duration::from_secs(10){
-                                    error!("No PONG request has been received in 10 seconds after sending PING request! Trying reconnection.");
-                                    shutdown_broadcast_sender.send(Shutdown::RECONNECT).unwrap();
-                                    break;
-                                }
-                            }
-                        }else{
-                            error!("No response has been received in 10 seconds after sending PING request! Trying reconnection.");
-                            shutdown_broadcast_sender.send(Shutdown::RECONNECT).unwrap();
-                            break;
+                    if let Err(_) = message_mpsc_sender.send(Request::PING).await{
+                        error!("Error while sending PING message to writer thread from ping thread. No active receivers.");
+                        if let Err(_) = shutdown_broadcast_sender.send(Shutdown::RECONNECT){
+                            error!("An error occured while trying to send reconnect message from ping thread to other threads.
+                                    No active shutdown broadcast receivers.");
                         }
-                    }} => {}
+                    }else{
+                        let mut message_broadcast_receiver = message_broadcast_receiver.resubscribe();
+                        let start_of_pong_wait = Instant::now();
+                        loop{
+                            if let Ok(request_result) = timeout(Duration::from_secs(10), message_broadcast_receiver.recv()).await{
+                                if let Ok(request) = request_result{
+                                    let elapsed_time = Instant::now().duration_since(start_of_pong_wait);
+                                    if matches!(request, Request::PONG) && elapsed_time < Duration::from_secs(10){
+                                        debug!("Received PONG in time!");
+                                        break;
+                                    }else if elapsed_time > Duration::from_secs(10){
+                                        error!("No PONG request has been received in 10 seconds after sending PING request! Trying reconnection.");
+                                        if let Err(_) = shutdown_broadcast_sender.send(Shutdown::RECONNECT){
+                                            error!("An error occured while trying to send reconnect message from ping thread to other threads.
+                                                    No active shutdown broadcast receivers.");
+                                        }
+                                        break;
+                                    }
+                                }
+                            }else{
+                                error!("No response has been received in 10 seconds after sending PING request! Trying reconnection.");
+                                if let Err(_) = shutdown_broadcast_sender.send(Shutdown::RECONNECT){
+                                    error!("An error occured while trying to send reconnect message from ping thread to other threads.
+                                            No active shutdown broadcast receivers.");
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    
+                    } => {}
             }
         }
         debug!("Ping thread has ended.");
