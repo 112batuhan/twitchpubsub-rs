@@ -2,3 +2,4 @@
 /old
 /cargo.lock
 secret.txt
+src/main.rs

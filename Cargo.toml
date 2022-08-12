@@ -1,7 +1,13 @@
 [package]
-name = "twchattest"
+name = "twitchpubsub"
 version = "0.1.0"
-edition = "2021"
+edition = "2022"
+repository = "https://github.com/112batuhan/twitchpubsub-rs"
+readme = "README.md"
+description = "A twitch.tv pubsub websocket library to receive channel reward events. Made for my main project."
+license = "MIT OR Apache-2.0"
+keywords = ["twitch", "pubsub"]
+authors = ["112servis"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
