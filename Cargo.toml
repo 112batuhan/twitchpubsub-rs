@@ -1,7 +1,7 @@
 [package]
 name = "twitchpubsub"
 version = "0.1.0"
-edition = "2022"
+edition = "2021"
 repository = "https://github.com/112batuhan/twitchpubsub-rs"
 readme = "README.md"
 description = "A twitch.tv pubsub websocket library to receive channel reward events. Made for my main project."
